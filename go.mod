@@ -1,4 +1,4 @@
-module KvDB
+module github.com/mhqdz/KvDB
 
 go 1.20
 
