@@ -52,8 +52,8 @@ func InitConf() Conf {
 	return *conf
 }
 
-// dBMaster 数据库管理者 使用它可以调用 get/set/del等方法
-type dBMaster struct {
+// DBMaster 数据库管理者 使用它可以调用 get/set/del等方法
+type DBMaster struct {
 	// 数据文件
 	dataFile *os.File
 	// sql语句历史文件
@@ -63,8 +63,8 @@ type dBMaster struct {
 }
 
 // InitDBMaster 根据配置文件创建DBMaster Conf通过InitConf()创建
-func InitDBMaster(conf Conf) (*dBMaster, error) {
-	var master dBMaster
+func InitDBMaster(conf Conf) (*DBMaster, error) {
+	var master DBMaster
 	filePath := conf.Data.Path + conf.Data.DbName
 	dataFile, err := os.OpenFile(filePath+".mhD", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
 	if err != nil {
@@ -85,7 +85,7 @@ func InitDBMaster(conf Conf) (*dBMaster, error) {
 }
 
 // Close 关闭文件
-func (master *dBMaster) Close() error {
+func (master *DBMaster) Close() error {
 	if err := master.dataFile.Close(); err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func (master *dBMaster) Close() error {
 }
 
 // GetJson Get key 返回json的byte数组
-func (master *dBMaster) GetJson(key string) ([]byte, error) {
+func (master *DBMaster) GetJson(key string) ([]byte, error) {
 	if v, ok := master.m[key]; ok {
 		buf := make([]byte, v[1])
 		_, err := master.dataFile.ReadAt(buf, int64(v[0]))
@@ -109,7 +109,7 @@ func (master *dBMaster) GetJson(key string) ([]byte, error) {
 }
 
 // Get Get key 把数据返回到传入的dst指针中
-func (master *dBMaster) Get(dst any, key string) error {
+func (master *DBMaster) Get(dst any, key string) error {
 	if v, ok := master.m[key]; ok {
 		buf := make([]byte, v[1])
 		_, err := master.dataFile.ReadAt(buf, int64(v[0]))
@@ -125,7 +125,7 @@ func (master *dBMaster) Get(dst any, key string) error {
 }
 
 // doSetSql 实现 set 传入key 以及对应的key对应的data文件中的偏移量和长度
-func (master *dBMaster) doSetSql(key string, offset, len int) error {
+func (master *DBMaster) doSetSql(key string, offset, len int) error {
 	master.m[key] = [2]int{offset, len}
 	_, err := master.sqlFile.WriteString("1" + string(encodeData([]byte(key))) + "*" + strconv.Itoa(offset) + "*" + strconv.Itoa(len) + "\n")
 	return &masterErr{
@@ -135,7 +135,7 @@ func (master *dBMaster) doSetSql(key string, offset, len int) error {
 }
 
 // Set Set key = value
-func (master *dBMaster) Set(key string, value any) error {
+func (master *DBMaster) Set(key string, value any) error {
 	if b, len, err := DataMarshal(value); err == nil {
 		stat, err := master.dataFile.Stat()
 		if err != nil {
@@ -163,7 +163,7 @@ func (master *dBMaster) Set(key string, value any) error {
 }
 
 // doDelSql 实现 Del key
-func (master *dBMaster) doDelSql(key string) error {
+func (master *DBMaster) doDelSql(key string) error {
 	if _, ok := master.m[key]; ok {
 		delete(master.m, key)
 
@@ -181,12 +181,12 @@ func (master *dBMaster) doDelSql(key string) error {
 }
 
 // Del del key delete的没有那么多错误要处理 为了和Set格式对齐写了这个多余的方法
-func (master *dBMaster) Del(key string) error {
+func (master *DBMaster) Del(key string) error {
 	return master.doDelSql(key)
 }
 
 // SqlFileRead 从索引文件中读取到map里
-func (master *dBMaster) SqlFileRead() error {
+func (master *DBMaster) SqlFileRead() error {
 	stat, err := master.sqlFile.Stat()
 	if err != nil {
 		return &masterErr{
@@ -264,7 +264,7 @@ func (master *dBMaster) SqlFileRead() error {
 }
 
 // GetKeys 把所有的key 集中到一个数组返回
-func (master *dBMaster) GetKeys() []string {
+func (master *DBMaster) GetKeys() []string {
 	keys := []string{}
 	for k := range master.m {
 		keys = append(keys, k)
@@ -273,7 +273,7 @@ func (master *dBMaster) GetKeys() []string {
 }
 
 // GetAll 返回所有键与值 key-json(value) 有些json不能解码成string 不如直接返回json
-func (master *dBMaster) GetAll() ([]string, []string, error) {
+func (master *DBMaster) GetAll() ([]string, []string, error) {
 	keys := []string{}
 	values := []string{}
 	for k := range master.m {
@@ -288,7 +288,7 @@ func (master *dBMaster) GetAll() ([]string, []string, error) {
 }
 
 // Source 优化并导出数据
-func (master *dBMaster) Source(filePath string) error {
+func (master *DBMaster) Source(filePath string) error {
 	if find := strings.Contains(filePath, "/") || strings.Contains(filePath, "\\"); find {
 		pathMkdir(filePath)
 	} else {
@@ -330,7 +330,7 @@ func (master *dBMaster) Source(filePath string) error {
 // todo
 // 实现思路 根据map里的数据 写两个新的文件 然后替换掉 .mhD 和 .mhI两个文件
 // Clear 去除两个data文件中没有用的东西
-func (master *dBMaster) Clear() error {
+func (master *DBMaster) Clear() error {
 	sqlStr := ""
 	newDatas := []byte{}
 	for k := range master.m {
