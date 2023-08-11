@@ -1,9 +1,10 @@
 package kvDB_test
 
 import (
-	"KvDB/kvDB"
 	"fmt"
 	"testing"
+
+	"github.com/mhqdz/KvDB/kvDB"
 )
 
 type testData struct {
