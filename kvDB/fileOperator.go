@@ -9,8 +9,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Data data文件设置
-type data struct {
+// Data Data文件设置
+type Data struct {
 	Path    string `yaml:"path"`
 	DbName  string `yaml:"dbName"`
 	MaxSize int    `yaml:"maxSize"`
@@ -18,12 +18,12 @@ type data struct {
 
 // Conf 读取 config/conf.yml的结果
 type Conf struct {
-	Data data `yaml:"data"`
+	Data Data `yaml:"data"`
 }
 
 // DefaultConf Conf默认配置
 var DefaultConf Conf = Conf{
-	Data: data{
+	Data: Data{
 		Path:    "../data/",
 		DbName:  "db01",
 		MaxSize: 4,
