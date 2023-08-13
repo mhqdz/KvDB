@@ -13,3 +13,8 @@ func pathMkdir(filePath string) error {
 	}
 	return os.MkdirAll(productPrePath, os.ModePerm)
 }
+
+// IsReservedWord 判断是否是不能作为key的保留字 目前只有mhKeyValueDatabaseLists
+func IsReservedWord(key string) bool {
+	return key == "mhKeyValueDatabaseLists"
+}

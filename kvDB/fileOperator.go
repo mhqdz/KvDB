@@ -1,11 +1,13 @@
 package kvDB
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,12 +62,40 @@ type DBMaster struct {
 	sqlFile *os.File
 	// hash存储 key和数据地址 []int{偏移量,长度}
 	m map[string][2]int
+	// mhKvDbLists 对于需要频繁改动的元组的特殊处理
+	// map中的数组是不可以扩容的 所以不能用下面的格式
+	// 使用数组存储 lists 然后用一个map去映射list名称和数组的index
+	// mhKvDbLists map[string]List
+	mhKvDbLists []List
+	// mhKvDbListsMap 也会标记更改过的数组
+	mhKvDbListsMap map[string]int
+	// 这个map存储一些只读的数组
+	mhKvDbListsReadOnlyMap map[string]List
+	// // mhKvDbListsChanged 标记更改过的数组
+	// mhKvDbListsChanged map[string]struct{}
+	listCnt  int
+	DataPath string
+}
+
+// List 数组结构体
+type List struct {
+	Arr  []any
+	Size int
 }
 
 // InitDBMaster 根据配置文件创建DBMaster Conf通过InitConf()创建
 func InitDBMaster(conf Conf) (*DBMaster, error) {
 	var master DBMaster
-	filePath := conf.Data.Path + conf.Data.DbName
+
+	master.initLists()
+	master.DataPath = conf.Data.Path
+
+	if err := os.MkdirAll(conf.Data.Path+"/lists", os.ModePerm); err != nil {
+		return nil, err
+	}
+
+	filePath := conf.Data.Path + "/" + conf.Data.DbName
+
 	dataFile, err := os.OpenFile(filePath+".mhD", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
 	if err != nil {
 		return nil, err
@@ -89,7 +119,10 @@ func (master *DBMaster) Close() error {
 	if err := master.dataFile.Close(); err != nil {
 		return err
 	}
-	return master.sqlFile.Close()
+	if err := master.sqlFile.Close(); err != nil {
+		return err
+	}
+	return master.persistenceLists()
 }
 
 // GetJson Get key 返回json的byte数组
@@ -137,6 +170,18 @@ func (master *DBMaster) doSetSql(key string, offset, len int) error {
 // Set Set key = value
 func (master *DBMaster) Set(key string, value any) error {
 	if b, len, err := DataMarshal(value); err == nil {
+		// 这一段if判断将set的值是否存在 我不确定这步是否多余 期待更好的做法
+		// 它能减少数据冗余 但为此牺牲了不少效率(要比较json 就必须要保证有序格式化)
+		if AddOff, ok := master.m[key]; ok && AddOff[1] == len {
+			// fmt.Println("进行了一次判断")
+			buf := make([]byte, AddOff[1])
+			_, err := master.dataFile.ReadAt(buf, int64(AddOff[0]))
+			if err == nil && bytes.Equal(buf, b) {
+				// 如果已经存在一样的值 什么都不干就行
+				return nil
+			}
+		}
+
 		stat, err := master.dataFile.Stat()
 		if err != nil {
 			return &masterErr{
@@ -327,7 +372,6 @@ func (master *DBMaster) Source(filePath string) error {
 	return nil
 }
 
-// todo
 // 实现思路 根据map里的数据 写两个新的文件 然后替换掉 .mhD 和 .mhI两个文件
 // Clear 去除两个data文件中没有用的东西
 func (master *DBMaster) Clear() error {
@@ -343,11 +387,184 @@ func (master *DBMaster) Clear() error {
 	}
 
 	// 直接动源文件的做法 错误不好处理 而且一旦发生错误 可能数据库就没了
-	// 最好是像事务一样处理下面的四个语句 出错回滚 但我不知道怎么做
+	// todo 最好是像事务一样处理下面的四个语句 出错回滚 但我不知道怎么做
+	// 下面的persistenceLists方法中文件更新选择了新建文件再rename 不确定哪种更高效 但下面那种一定更安全
 	master.dataFile.Truncate(0)
 	master.dataFile.Write(newDatas)
 	master.sqlFile.Truncate(0)
 	master.sqlFile.WriteString(sqlStr)
 
 	return nil
+}
+
+// initLists lists初始化配置
+func (master *DBMaster) initLists() {
+	master.mhKvDbListsMap = make(map[string]int)
+	master.mhKvDbLists = make([]List, 0)
+	master.mhKvDbListsReadOnlyMap = make(map[string]List)
+	master.listCnt = 0
+}
+
+// persistenceLists 数组持久化
+func (master *DBMaster) persistenceLists() error {
+	for k, v := range master.mhKvDbListsMap {
+		fileName := master.DataPath + "/lists/" + k + ".mhL"
+
+		b, err := sonic.Marshal(master.mhKvDbLists[v])
+		if err != nil {
+			return &masterErr{
+				msg: "数组编码错误",
+				Err: err,
+			}
+		}
+
+		// 写入临时文件
+		f, err := os.Create(fileName + ".tmp")
+		if err != nil {
+			return &masterErr{
+				msg: "临时文件创建错误",
+				Err: err,
+			}
+		}
+
+		f.Write(b)
+		f.Sync()
+		f.Close()
+
+		err = os.Rename(fileName+".tmp", fileName)
+		if err != nil {
+			return &masterErr{
+				msg: "文件覆盖错误",
+				Err: err,
+			}
+		}
+	}
+	return nil
+}
+
+// ListPush 在数组后面追加一个元素
+func (master *DBMaster) ListPush(listName string, value any) error {
+	idx, err := master.ListGetIndexByListName(listName)
+	if err != nil {
+		return err
+	}
+	if master.mhKvDbLists[idx].Size == len(master.mhKvDbLists[idx].Arr) {
+		return &masterErr{
+			msg: "push error:数组已满",
+		}
+	}
+
+	arr := append(master.mhKvDbLists[idx].Arr, value)
+
+	master.mhKvDbLists[idx].Arr = arr
+	return nil
+}
+
+// ListInsert 在数组中插入一个元素
+func (master *DBMaster) ListInsert(listName string, index int, value any) error {
+	idx, err := master.ListGetIndexByListName(listName)
+	if err != nil {
+		return err
+	}
+	if master.mhKvDbLists[idx].Size == len(master.mhKvDbLists[idx].Arr) {
+		return &masterErr{
+			msg: "push error:数组已满",
+		}
+	}
+
+	master.mhKvDbLists[idx].Arr = append(master.mhKvDbLists[idx].Arr, value)
+
+	return nil
+}
+
+// ListSet 改变list的某个值
+func (master *DBMaster) ListSet(listName string, index int, value any) error {
+	idx, err := master.ListGetIndexByListName(listName)
+	if err != nil {
+		return err
+	}
+	if len(master.mhKvDbLists[idx].Arr) <= index {
+		return &masterErr{
+			msg: "list set 不应该超出list长度, 如果需要追加元素请使用 ListPush",
+		}
+	}
+	master.mhKvDbLists[idx].Arr[index] = value
+	return nil
+}
+
+// ListGetIndexByListName 根据list名称获取在数组中的index 如果key不存在的话 去数据文件里查找
+func (master *DBMaster) ListGetIndexByListName(key string) (int, error) {
+	if idx, ok := master.mhKvDbListsMap[key]; ok {
+		return idx, nil
+	}
+	// 查找path文件中是否包含文件file
+	filePath := master.DataPath + "/lists/" + key + ".mhL"
+	if fileData, err := os.ReadFile(filePath); os.IsNotExist(err) {
+		master.ListsPush(key, List{
+			Arr:  make([]any, 0),
+			Size: -1,
+		})
+		return master.listCnt - 1, nil
+	} else if err != nil {
+		// 读取文件内容
+		return -1, &masterErr{
+			msg: "读取文件失败",
+			Err: err,
+		}
+	} else {
+		var list List
+		// 解码文件内容
+		if err := sonic.Unmarshal(fileData, &list); err != nil {
+			return -1, &masterErr{
+				msg: "数组解码错误",
+				Err: err,
+			}
+		}
+
+		master.ListsPush(key, list)
+
+		return master.listCnt - 1, nil
+	}
+}
+
+// ListGet 返回整个list的拷贝 如果在map中就返回新的 如果不在 则返回文件数据 否则返回空
+func (master *DBMaster) ListsGet(key string) (List, error) {
+	if idx, ok := master.mhKvDbListsMap[key]; !ok {
+		return master.mhKvDbLists[idx], nil
+	}
+
+	if list, ok := master.mhKvDbListsReadOnlyMap[key]; ok {
+		return list, nil
+	}
+
+	// 查找path文件中是否包含文件file
+	filePath := master.DataPath + "/lists/" + key + ".mhL"
+
+	if fileData, err := os.ReadFile(filePath); os.IsNotExist(err) {
+		// 文件不存在 则返回空
+		return List{}, nil
+	} else if err != nil {
+		// 读取文件内容
+		return List{}, &masterErr{
+			msg: "读取文件失败",
+			Err: err,
+		}
+	} else {
+		var list List
+		if err := sonic.Unmarshal(fileData, &list); err != nil {
+			return list, &masterErr{
+				msg: "数组解码错误",
+				Err: err,
+			}
+		}
+		master.mhKvDbListsReadOnlyMap[key] = list
+		return list, nil
+	}
+}
+
+// ListsPush 把一个List读入内存
+func (master *DBMaster) ListsPush(key string, list List) {
+	master.mhKvDbListsMap[key] = master.listCnt
+	master.listCnt++
+	master.mhKvDbLists = append(master.mhKvDbLists, list)
 }
